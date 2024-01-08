@@ -1,35 +1,77 @@
 #!/usr/bin/env bash
-set -ex
+set -e
 # PharoVM with VM profiler and threaded heartbeat
-THIRDPARTYLIBS="libsdl2 openssl libssh2 libgit2"
-INSTALLDIR=phcogspur64linuxht
 
-# Some gcc versions create a broken VM using -O2
-case $(c99 -dumpversion) in
-3.4.*)	OPT="-g -O1 -fwrapv -DNDEBUG -DDEBUGVM=0";;
-*)	OPT="-g -O2 -DNDEBUG -DDEBUGVM=0";;
-esac
-OPT="$OPT -DPharoVM"
+
+#
+# Config variables
+#
+#: ${THIRDPARTYLIBS:="libsdl2 openssl libssh2 libgit2"} # <-- original list
+: ${THIRDPARTYLIBS:=libgit2}                            # <-- sigh, we have to build libgit2 because path to
+                                                        # .so is hardcoded to plugins dir!
+: ${INSTALLDIR:=release/phcogspur64linuxht}
+: ${OPT="-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -fwrapv -ggdb -O2 -DNDEBUG -DDEBUGVM=0 -DPharoVM"}
+
+
+#
+# Detect and use correct GCC. As of 2024-01-08, Pharo 8 VM
+# does not compile with GCC > 8 (sigh). Luckily, GCC 8 is still
+# available in Debian Trixie (and older).
+#
+if [ -z "$CC" ]; then
+	# No $CC set, autodetect suitable GCC
+	for ver in 8 7 6 5; do
+		if which gcc-$ver > /dev/null; then
+			CC=gcc-$ver
+			break;
+		fi
+	done
+	if [ -z "$CC" ]; then
+		echo "No suitable GCC found (need gcc 8 or older). You may want to set CC variable manually."
+		exit 1
+	fi
+else
+	# $CC set, validate
+	case $($CC --version | head -n 1) in
+		*gcc*)
+			ver=$($CC -dumpversion | sed -e 's#\..*$##g')
+			if [ "$ver" -gt 8 ]; then
+				echo "Need GCC 8 or older, not GCC $ver"
+				exit 1
+			fi
+			break
+			;;
+		*clang*)
+			echo "WARNING: clang is not tested, Ctrl-C to abort, any key to continue"
+			read ignore
+			break
+			;;
+	esac
+fi
 
 if [ $# -ge 1 ]; then
 	INSTALLDIR="$1"; shift
 fi
 
-if ../../scripts/checkSCCSversion ; then exit 1; fi
-echo -n "clean? "
+echo "THIRDPARTYLIBS=$THIRDPARTYLIBS"
+echo "INSTALLDIR=$INSTALLDIR"
+echo "OPT=$OPT"
+
+if ../../../scripts/checkSCCSversion ; then exit 1; fi
+echo -n "clean (Y/n)? "
 read a
 case $a in
 n|no|N|NO)	echo "ok but this isn't safe!!";;
 *)	test -f Makefile && make reallyclean
-#	for lib in ${THIRDPARTYLIBS}; do
-#		../../third-party/mvm ${lib} clean
-#	done
+	for lib in ${THIRDPARTYLIBS}; do
+		../../third-party/mvm ${lib} clean
+	done
 esac
 test -f plugins.int || (test -f ../plugins.int && cp -p ../plugins.int . || cp -p ../../plugins.int .)
 test -f plugins.ext || (test -f ../plugins.ext && cp -p ../plugins.ext . || cp -p ../../plugins.ext .)
 
 for lib in ${THIRDPARTYLIBS}; do
-	../../third-party/mvm ${lib}
+	../../third-party/mvm ${lib} || (echo "Failed to compile ${lib}" && exit 1)
 done
 
 test -f config.h || ../../../platforms/unix/config/configure \
@@ -37,6 +79,7 @@ test -f config.h || ../../../platforms/unix/config/configure \
 		--with-vmversion=5.0 \
 		--with-src=spur64src \
 	TARGET_ARCH="-m64" \
+	CC=$CC \
 	CFLAGS="$OPT -msse2 -DCOGMTVM=0" \
 	LDFLAGS="-Wl,-rpath,'\$\$ORIGIN' "
 rm -f vm/sqUnixMain.o # nuke version info
